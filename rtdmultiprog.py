@@ -103,7 +103,7 @@ def ISPRead(address, length, progressCallback=lambda s, e, c: None):
     WriteReg(0x60, 0x47) # Execute the command
 
     attempts = 0
-    while (ReadReg(0x60)[0] & 1):        
+    while (ReadReg(0x60)[0] & 1):
         time.sleep(.001) # // TODO: add timeout and reset the controller
         if attempts == 100:
             raise TimeoutError("Timed out reading chip")
@@ -414,7 +414,7 @@ def StartInterface(device):
     EnterISP()
 
     configs = configparser.ConfigParser()
-    configs.read("flashDevices.cfg")
+    configs.read(scriptFolder+os.sep+"flashDevices.cfg")
 
     jedecID = ISPCommonInstruction(CI_READ, 0x9f, 3, 0, 0)
     print("JEDEC ID: 0x%x" % jedecID)
