@@ -1,23 +1,29 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 
-from genericpath import exists
-from importlib   import import_module
-from argparse    import ArgumentParser
-import os, sys, time
-import configparser
-import platform
+import os, platform, sys
+from misc.flashparams import *
+from misc.funcs       import *
+from importlib        import import_module
+from genericpath      import exists
+from argparse         import ArgumentParser
 
-scriptFolder = os.path.dirname(os.path.abspath(__file__)) # Folder where the RTDMultiProg resides
-sys.path.insert(0, scriptFolder) # Add RTDMultiProg folder to path for imports
+script_folder = os.path.dirname(os.path.abspath(__file__))
 
-iface  = None
-config = None
+# If `None`, parse from command line;
+# else if strings, parse from this variable
+parameters = None
+
+# Global definition of the current interface
+iface = None
+
+# Alias for os.sep
+SEP = os.sep
 
 # Controller's address on I2C bus
-RTD2660_ISP_ADR         = 0x4A
-RTD2660_ISP_AUTOINC_ADR = RTD2660_ISP_ADR | 1
+RTD_ISP_ADR         = 0x4A
+RTD_ISP_AUTOINC_ADR = RTD_ISP_ADR | 1
 
-# Common instructions
+# Custom instruction types
 CI_NOP   = 0
 CI_WRITE = 1
 CI_READ  = 2
@@ -26,505 +32,331 @@ CI_WRITE_AFTER_EWSR = 4
 CI_ERASE = 5
 
 
+def calculate_crc(data):
+    """ Calculate CRC-8-CCITT (Poly: x^8 + x^2 + x + 1) """
+    crc = 0x00
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07 if crc & 0x80 else crc << 1) & 0xFF
+    return crc
 
-def WriteReg(address, data, isAutoinc=False):
-    if (type(data) == int):
-        data = [ address, data ]
+def is_empty_page(data):
+    """ Test if page only contains 0xFF """
+    for value in data:
+        if value != 0xFF:
+            return False
+    return True
+
+
+def write_reg(address, data, is_autoinc=False):
+    # Single int to list of one element
+    if isinstance(data, int):
+        data = [data]
+    # Cap integers to byte range
+    data = [(i & 0xFF) for i in data]
+    # Divide list into chunks with address appended
+    if iface.MAXIMUM_WRITE_AMOUNT == 0:
+        data = [[address] + data]
     else:
-        data.insert(0, address)
-    iface.WriteI2C(RTD2660_ISP_ADR if isAutoinc else RTD2660_ISP_AUTOINC_ADR, data)
+        data = [[address] + i for i in div_to_chunks(data, iface.MAXIMUM_WRITE_AMOUNT-1)]
+    for chunk in data:
+        iface.write_i2c(RTD_ISP_AUTOINC_ADR if is_autoinc else RTD_ISP_ADR, chunk)
 
-def ReadReg(address, count=1):
-    iface.WriteI2C(RTD2660_ISP_ADR, [ address ])
-    return iface.ReadI2C(RTD2660_ISP_ADR, count)
-
-
-
-def EnterISP():
-    """ Enable ISP, Disable internal MCU """
-    try:
-        WriteReg(0x6F, 0x80)
-    except IOError:
-        pass # Controller doesn't acknowledge the first transaction?
-    if ((ReadReg(0x6F)[0] & 0x80) != 0x80):
-        raise ConnectionError("Failed to enter into ISP mode")
-
-def RebootController():
-    """ Disable ISP, Restart internal MCU """
-    WriteReg(0xEE, 0x02)
-    WriteReg(0x6F, 0x01)
-
-def GetJedecID():
-    return ISPCommonInstruction(CI_READ, 0x9F, 3, 0, 0)
-
-
-
-def ISPCommonInstruction(cmd_type, cmd_code, nreads, nwrites, wvalue):
-    nreads    = nreads  & 3
-    nwrites   = nwrites & 3
-    wvalue    = wvalue  & 0xFFFFFF
-    reg_value = (cmd_type<<5) | (nwrites<<3) | (nreads<<1)
-
-    WriteReg(0x60, reg_value)
-    WriteReg(0x61, cmd_code)
-    if nwrites==3:
-        WriteReg(0x64, wvalue >> 16)
-        WriteReg(0x65, wvalue >> 8)
-        WriteReg(0x66, wvalue)
-    elif nwrites==2:
-        WriteReg(0x64, wvalue >> 8)
-        WriteReg(0x65, wvalue)
-    elif nwrites==1:
-        WriteReg(0x64, wvalue)
-
-    WriteReg(0x60, reg_value | 1)
-
-    while ReadReg(0x60)[0] & 1:
-        time.sleep(.001)
-        continue
-
-    if   nreads==0:
-        return 0
-    elif nreads==1:
-        return  ReadReg(0x67)[0]
-    elif nreads==2:
-        return (ReadReg(0x67)[0] << 8)  |  ReadReg(0x68)[0]
-    elif nreads==3:
-        return (ReadReg(0x67)[0] << 16) | (ReadReg(0x68)[0] << 8) | ReadReg (0x69)[0]
-    return 0
-
-# TODO: Merge with ProgramFlash
-def ISPRead(address, length, progressCallback=lambda s, e, c: None):
-    WriteReg(0x60, 0x46)
-    WriteReg(0x61, 0x3)
-    WriteReg(0x64, address >> 16)
-    WriteReg(0x65, address >> 8)
-    WriteReg(0x66, address)
-    WriteReg(0x60, 0x47) # Execute the command
-
-    attempts = 0
-    while (ReadReg(0x60)[0] & 1):
-        time.sleep(.001) # // TODO: add timeout and reset the controller
-        if attempts == 100:
-            raise TimeoutError("Timed out reading chip")
-
+def read_reg(address, count=1, is_autoinc=False):
+    if iface.MAXIMUM_READ_AMOUNT == 0:
+        bytes_per_trans = count
+    else:
+        bytes_per_trans = iface.MAXIMUM_READ_AMOUNT
     data = []
-    while length > 0:
-        read_len = length
-        if read_len > 64:
-            read_len = 64
-        data += ReadReg(0x70, read_len)
-        length -= read_len
-
+    for byte_n in range(0, count, bytes_per_trans):
+        iface.write_i2c(RTD_ISP_ADR, [address])
+        data += iface.read_i2c(RTD_ISP_AUTOINC_ADR if is_autoinc else RTD_ISP_ADR,
+                               min(count - byte_n, bytes_per_trans))
     return data
 
-def ISPGetCRC(start, end):
-    WriteReg(0x64, start >> 16)
-    WriteReg(0x65, start >> 8)
-    WriteReg(0x66, start)
 
-    WriteReg(0x72, end >> 16)
-    WriteReg(0x73, end >> 8)
-    WriteReg(0x74, end)
+def enter_isp():
+    """ Enable In-System Programming mode, Disable internal MCU """
+    write_reg(0x6F, 0x80)
+    if not (read_reg(0x6F)[0] & 0x80):
+        raise ConnectionError("Failed to enter into ISP mode")
 
-    WriteReg(0x6F, 0x84)
+def reboot_controller():
+    """ Disable In-System Programming mode, Restart internal MCU """
+    write_reg(0xEE, 0x02)
+    write_reg(0x6F, 0x01)
 
-    attempts = 0
-    while not (ReadReg(0x6F)[0] & 2):
-        time.sleep(.001)
-        if attempts == 100:
-            raise TimeoutError("Timed out reading CRC chip")
+def isp_custom_instruction(cmd_type, cmd_code, read_n, write_n, write_value):
+    if   write_n == 1:
+        write_reg(0x64, write_value)
+    elif write_n == 2:
+        write_reg(0x64, write_value >> 8)
+        write_reg(0x65, write_value)
+    elif write_n == 3:
+        write_reg(0x64, write_value >> 16)
+        write_reg(0x65, write_value >> 8)
+        write_reg(0x66, write_value)
 
-    return ReadReg(0x75)[0]
+    # Execute custom instruction and wait until done
+    write_reg(0x61, cmd_code)
+    write_reg(0x60, (cmd_type<<5) | (write_n<<3) | (read_n<<1) | 1)
+    poll(lambda: not read_reg(0x60)[0] & 0x01, "Custom Instruction Timeout")
 
+    if   read_n == 1:
+        return  read_reg(0x67)[0]
+    elif read_n == 2:
+        return (read_reg(0x67)[0] << 8)  |  read_reg(0x68)[0]
+    elif read_n == 3:
+        return (read_reg(0x67)[0] << 16) | (read_reg(0x68)[0] << 8) | read_reg (0x69)[0]
+    else:
+        return None
 
+def isp_get_crc(start_address, end_address):
+    write_reg(0x64, start_address >> 16)
+    write_reg(0x65, start_address >> 8)
+    write_reg(0x66, start_address)
 
-def EraseFlash():
-    print("Erasing...")
-    ISPCommonInstruction(CI_WRITE_AFTER_EWSR, 1, 0, 1, 0) # Unprotect the Status Register
-    ISPCommonInstruction(CI_WRITE_AFTER_WREN, 1, 0, 1, 0) # Unprotect the flash
-    ISPCommonInstruction(CI_ERASE, 0xC7, 0, 0, 0)         # Erase the flash
+    write_reg(0x72, end_address >> 16)
+    write_reg(0x73, end_address >> 8)
+    write_reg(0x74, end_address)
+
+    # Start CRC calculation and wait until done
+    write_reg(0x6F, 0x84)
+    poll(lambda: read_reg(0x6F)[0] & 0x02, "CRC Read Timeout")
+
+    return read_reg(0x75)[0]
+
+def get_flash_id():
+    return isp_custom_instruction(CI_READ, RDID, 2, 0, 0x00)
+
+def erase_flash():
+    print("Erasing... ", end='')
+    isp_custom_instruction(CI_WRITE_AFTER_WREN, WRSR, 0, 1, 0x00) # Unprotect the flash
+    isp_custom_instruction(CI_ERASE, ERAS, 0, 0, 0x00)            # Erase the flash
+    isp_custom_instruction(CI_WRITE_AFTER_WREN, WRSR, 0, 1, 0x1C) # Protect the flash
     print("done")
 
-def ProgramFlash(chip_size, data, progressCallback=lambda s, e, c: None):
-    print("Will write {0:.1f} Kib".format(len(data) / 1024))
-    addr = 0
-    data_len = len(data)
-    data_ptr = 0
-    crc = CRC()
-    while addr < chip_size and data_len:
-        attempts = 0
-        while ReadReg (0x6F)[0] & 0x40:
-            time.sleep(.001)
-            if attempts == 100:
-                raise TimeoutError("Timed out reading ready chip")
+def program_flash(data, progress_callback=lambda s, e, c: None):
+    print(f"Will write {len(data) / 1024:.1f} KiB")
 
-        #print("Writting addr {0:#04x}".format(addr))
-        progressCallback(0, len(data), addr)
+    isp_custom_instruction(CI_WRITE_AFTER_WREN, WRSR, 0, 1, 0x00) # Unprotect the flash
+    pages = list(div_to_chunks(data, PAGE_SIZE))
+    for page_n, page in enumerate(pages):
+        progress_callback(0, len(pages), page_n)
 
-        lng = 256
-        if lng > data_len:
-            lng = data_len
-        buff = []
-        for i in range(lng):
-            buff.append(data[data_ptr+i])
-
-        data_ptr += lng
-        data_len -= lng
-
-        if ShouldProgramPage(buff):
-            # Set program size-1
-            WriteReg(0x71, lng - 1)
-
+        if not is_empty_page(page): # If page is filled with 0xFF, then don't write to it
+            poll(lambda: not read_reg (0x6F)[0] & 0x40, "Programming done timeout")
+            # Set write size
+            write_reg(0x71, len(page) - 1)
             # Set the programming address
-            WriteReg(0x64, addr >> 16)
-            WriteReg(0x65, addr >> 8)
-            WriteReg(0x66, addr)
+            write_reg(0x64, page_n*PAGE_SIZE >> 16)
+            write_reg(0x65, page_n*PAGE_SIZE >> 8)
+            write_reg(0x66, page_n*PAGE_SIZE)
+            # Write the content to on chip buffer
+            write_reg(0x70, page)
+            # Begin flash programming
+            write_reg(0x6F, 0xA0)
 
-            # Write the content to register 0x70
-            lngtowrite = lng
-            startbit = 0
-            while lngtowrite > 0:
-                prl = 255
-                if prl > lngtowrite:
-                    prl = lngtowrite
-                WriteReg(0x70, buff[startbit:startbit + prl], True)
-                startbit   += prl
-                lngtowrite -= prl
+    progress_callback(0, len(data), len(data)) # Signal 100% to progress function
 
-            WriteReg(0x6F, 0xa0)
+    poll(lambda: not read_reg (0x6F)[0] & 0x40, "Programming done timeout")
+    isp_custom_instruction(CI_WRITE_AFTER_WREN, WRSR, 0, 1, 0x1C)  # Protect the flash
 
-        crc.ProcessCRC(buff)
-        addr += lng
-
-    progressCallback(0, len(data), len(data)) # Signal done
-
-    attempts = 0
-    while ReadReg (0x6F)[0] & 0x40:
-        time.sleep(.001)
-        if attempts == 100:
-            raise TimeoutError("Timed out reading ready chip")
-
-    ISPCommonInstruction(CI_WRITE_AFTER_EWSR, 1, 0, 1, 0x1C)  # Unprotect the Status Register
-    ISPCommonInstruction(CI_WRITE_AFTER_WREN, 1, 0, 1, 0x1C)  # Protect the flash
-
-    data_crc = crc.GetCRC()
-    chip_crc = ISPGetCRC (0, addr - 1)
-    print("Received data CRC {0:#04x}".format(data_crc))
-    print("Chip CRC {0:#04x}".format(chip_crc))
+    data_crc = calculate_crc(data)
+    chip_crc = isp_get_crc(0, len(data) - 1)
+    print(f"File CRC: {data_crc:#04x}")
+    print(f"Chip CRC: {chip_crc:#04x}")
     return data_crc == chip_crc
 
-def ReadFlash(chip_size, progressCallback=lambda s, e, c: None):
+def read_flash(chip_size, progress_callback=lambda s, e, c: None):
+    print(f"Will read {chip_size / 1024:.1f} KiB")
     data = []
-    crc  = CRC()
-    addr = 0
-    chip_crc = ISPGetCRC(0, chip_size-1)
-    while addr < chip_size:
-        progressCallback(0, chip_size, addr)
 
-        buf = ISPRead(addr, 1024, progressCallback)
-        data.extend(buf)
+    isp_custom_instruction(CI_READ, READ, 3, 3, 0)
+    poll(lambda: not read_reg(0x60)[0] & 0x01, "Read Instruction Timeout")
+    for address in range(0, chip_size, PAGE_SIZE):
+        progress_callback(0, chip_size, address)
+        data += read_reg(0x70, min(chip_size - address, PAGE_SIZE)) # If amount to read is more than PAGE_SIZE byte then read PAGE_SIZE, else read remaining amount
 
-        crc.ProcessCRC(buf)
-        addr += 1024
+    progress_callback(0, chip_size, chip_size) # Signal 100% to progress function
 
-    progressCallback(0, chip_size, chip_size) # Signal done
-    data_crc = crc.GetCRC()
-    print("Received data CRC {0:#04x}".format(data_crc))
-    print("Chip CRC {0:#04x}".format(chip_crc))
-    return (data, data_crc==chip_crc)
-
-def ShouldProgramPage(buff):
-    chff = chr(0xff)
-    for ch in buff:
-        if ch != chff:
-            return True
-    return False
+    data_crc = calculate_crc(data)
+    chip_crc = isp_get_crc(0, chip_size - 1)
+    print(f"File CRC: {data_crc:#04x}")
+    print(f"Chip CRC: {chip_crc:#04x}")
+    return ( data, data_crc == chip_crc )
 
 
+def get_interface_list():
+    """ Return string list of all available interfaces """
+    iface_list_ = os.listdir(script_folder+SEP+"interfaces")
+    iface_list  = []
+    for interface in iface_list_:
+        # Add folders with main.py file
+        # and folders not starting with an underscore
+        if exists(script_folder+SEP+"interfaces"+SEP+interface+SEP+"main.py") \
+           and not interface.startswith('_'):
+            iface_list.append(interface)
+    return iface_list
 
-def SetupChipCommands():
-    print("Setup chip commands for Winbond...")
-    # These are the codes for Winbond
-    WriteReg ( 0x62, 0x06 )  #// Write Enable opcode
-    WriteReg ( 0x63, 0x50 )  #// Write Status Register Enable opcode
-    WriteReg ( 0x6a, 0x03 )  #// Read opcode
-    WriteReg ( 0x6b, 0x0b )  #// Fast Read opcode
-    WriteReg ( 0x6d, 0x02 )  #// Program opcode
-    WriteReg ( 0x6e, 0x05 )  #// Read Status Register opcode
-
-
-class CRC():
-    """Computes CRC in the memory"""
-
-    def __init__(self):
-        self.gCrc = 0
-
-    def ProcessCRC(self, data):
-        for byte in data:
-            self.gCrc ^= byte << 8
-            for i in range(8):
-                if self.gCrc & 0x8000:
-                    self.gCrc ^= 0x1070 << 3
-                self.gCrc <<= 1
-
-    def GetCRC(self):
-        return (self.gCrc >> 8) & 0xFF
-
-
-
-class BitStream():
-    def __init__(self, data):
-        self.mask = 0x80
-        self.data = data
-        self.dataptr = 0
-        self.datalen = len(data)
-
-    def HasData(self):
-        return self.mask != 0 or self.datalen != 0
-
-    def DataSize(self):
-        return self.datalen
-
-    def ReadBit(self):
-        if not self.mask:
-            self.__NextMask()
-
-        bres = ord(self.data[self.dataptr]) & self.mask
-        self.mask >>= 1
-        return bres
-
-    def __NextMask(self):
-        if self.datalen:
-            self.mask = 0x80
-            self.dataptr += 1
-            self.datalen -= 1
-
-class Nibble(BitStream):
-    def Decode(self):
-        zerocnt = 0
-        while zerocnt < 6:
-            if not self.HasData():
-                return 0xF0
-            if self.ReadBit():
-                break
-            zerocnt += 1
-        if zerocnt > 5:
-            if self.DataSize() == 1:
-                return 0xF0
-            return 0xFF
-
-        if zerocnt == 0:
-            return 0x0
-        elif zerocnt == 1:
-            return 0xF if self.ReadBit() else 0x1
-        elif zerocnt == 2:
-            return 0x8 if self.ReadBit() else 0x2
-        elif zerocnt == 3:
-            return 0x7 if self.ReadBit() else 0xC
-        elif zerocnt == 4:
-            if self.ReadBit():
-                return 0x9 if self.ReadBit() else 0x4
-            elif self.ReadBit():
-                return 0x5 if self.ReadBit() else 0xA
-            else:
-                return 0xB if self.ReadBit() else 0x3
-        elif zerocnt == 5:
-            if self.ReadBit():
-                return 0xD if self.ReadBit() else 0xE
-            else:
-                return 0x6 if self.ReadBit() else 0xFF
-        return 0xFF
-
-def ComputeGffDecodedSize(data):
-    nb = Nibble(data)
-    cnt = 0
-    while nb.HasData():
-        b = nb.Decode()
-        if b == 0xFF:
-            return 0
-        elif b == 0xf0:
-            return cnt
-        if nb.Decode() > 0xF:
-            return 0
-        cnt += 1
-    return cnt
-
-def DecodeGff(data):
-    nb = Nibble (data)
-    output = []
-    while nb.HasData():
-        n1 = nb.Decode()
-        if n1 == 0xF0:
-            return (True, ''.join(chr(i) for i in output))
-        elif n1 == 0xFF:
-            return (False, None)
-        n2 = nb.Decode()
-        if n2 > 0xF:
-            return (False, None)
-        output.append ( (n1<<4)|n2 )
-    return (True, ''.join(chr(i) for i in output))
-
-
-
-def GetInterfaceList():
-    """ Get string array of all available interfaces """
-    ifList = os.listdir(scriptFolder+os.sep+"interfaces")
-    for interface in ifList: # Remove folders without main.py file
-        if not exists(scriptFolder+os.sep+"interfaces" + os.sep + interface + os.sep + "main.py"):
-            ifList.pop(ifList.index(interface))
-    return ifList
-
-def LoadInterface(interface):
+def load_interface(interface):
     try:
-        ifaceModule = import_module("interfaces."+interface+"."+"main").I2C
-    except ModuleNotFoundError: # Rethrow exception with our message
-        raise ModuleNotFoundError("Interface \"{0}\" not found or is incorrect.".format(interface))
+        iface_module = import_module(f"interfaces.{interface}.main").I2C
+    except ModuleNotFoundError as e: # Rethrow exception with our message
+        raise ModuleNotFoundError(f"Interface \"{interface}\" not found or is incorrect.") from e
 
-    # Test if all systems are supported or we are in supported systems
-    if not (ifaceModule.AvailableSystems == [""] or platform.system() in ifaceModule.AvailableSystems):
-        raise SystemError("Interface supports {0}; not {1}".format(', '.join(ifaceModule.AvailableSystems), platform.system()))
-    # Test if all architectures are supported or we are in supported architectures
-    if not (ifaceModule.AvailableArchitectures == [""] or platform.architecture()[0] in ifaceModule.AvailableArchitectures):
-        raise SystemError("Interface supports {0}; not {1}\n{2}".format(', '.join(ifaceModule.AvailableArchitectures), platform.architecture()[0],
-                          "If the interface doesn't support 32 or 64 bit architecture, try running it with 64 or 32 bit python."))
+    # Test if all systems are supported or we are running on a supported system
+    if not (iface_module.AVAILABLE_SYSTEMS == [""] or platform.system() in iface_module.AVAILABLE_SYSTEMS):
+        raise SystemError(f"Interface supports {', '.join(iface_module.AVAILABLE_SYSTEMS)}; not {platform.system()}")
+
+    # # Test if all architectures are supported orwe are running on a supported architecture
+    # mach_to_bits = { "x86_64": "64bit", "x86": "32bit" } # Machine name to executable bitness
+    # win_to_gnu   = { "AMD64": "x86_64", "x86": "i386" }  # Windows machine to GNU triplet conversion
+    # if not (iface_module.AVAILABLE_ARCHITECTURES == [""] or \
+    #         ((platform.machine() in iface_module.AVAILABLE_ARCHITECTURES or \
+    #         win_to_gnu.get(platform.machine()) in iface_module.AVAILABLE_ARCHITECTURES) and \
+    #         mach_to_bits.get(iface_module.AVAILABLE_ARCHITECTURES) == platform.architecture[0])):
+    #     raise SystemError(f"Interface supports {', '.join(iface_module.AVAILABLE_ARCHITECTURES)}; not {platform.machine()}\n" +
+    #                        "If the interface doesn't support 32 or 64 bit architecture, try running it with 64 or 32 bit python interpreter.")
 
     global iface
-    iface = ifaceModule()
+    iface = iface_module()
 
-def GetDeviceList():
-    devDict_ = iface.ListI2C()
-    devDict = {}
-    for dev in devDict_:
-        isPresent = False
+def get_device_list(settings=None):
+    dev_dict_ = iface.list_i2c()
+    dev_dict  = {}
+    for dev in dev_dict_:
+        is_present = False
         try:
-            iface.InitI2C(dev)
-            WriteReg(0x6F, 0x80)
-            if ReadReg(0x6F)[0] & 0x80: # If no device on bus then, addressing them will result in pulled up sda
-                isPresent = True
-            WriteReg(0x6F, 0x00)
-            iface.DeinitI2C()
+            iface.init_i2c(dev, settings)
+            is_present = iface.detect_i2c(RTD_ISP_ADR)
+            iface.deinit_i2c()
         except ConnectionError:
             pass # isPresent = False
-        devDict.update({ dev: ( devDict_[dev], isPresent )})
-    return devDict
+        dev_dict.update({ dev: ( dev_dict_[dev], is_present )})
+    return dev_dict
 
-def StartInterface(device):
-    iface.InitI2C(device)
-    EnterISP()
+def start_interface(device, settings=None):
+    iface.init_i2c(device, settings)
+    enter_isp()
 
-    configs = configparser.ConfigParser()
-    configs.read(scriptFolder+os.sep+"flashDevices.cfg")
+def setup_flash():
+    flash_id = get_flash_id()
+    print(f"FLASH ID: {flash_id:#04x}")
+    write_reg(0x62, WREN)  # Write Enable opcode
+    write_reg(0x63, EWSR)  # Enable Write Status Register opcode
+    write_reg(0x6A, READ)  # Read opcode
+    write_reg(0x6D, PRGM)  # Program opcode
+    write_reg(0x6E, RDSR)  # Read Status Register opcode
 
-    jedecID = ISPCommonInstruction(CI_READ, 0x9f, 3, 0, 0)
-    print("JEDEC ID: 0x%x" % jedecID)
+def stop_interface():
+    reboot_controller()
+    iface.deinit_i2c()
 
-    SetupChipCommands()
 
-    global config
-    for config_ in configs:
-        if (config_ == "DEFAULT"):
-            continue
-        if int(configs[config_]["Signature"], 16) == jedecID:
-            config = configs[config_]
-            break
-    if not config:
-        print("No matching device for ID {0:#010x} found, try adding device parameters to flashDevices.cfg".format(jedecID))
-        return 1
+def read_flash_file(filename, callback=None):
+    with open(filename, "wb") as fr:
+        buf, crc_ok = read_flash(READ_SIZE, callback)
+        fr.write(bytearray(buf))
+        return crc_ok
 
-    print("DEVICE:   " + config_)
-    return 0
+def write_flash_file(filename, callback=None):
+    with open(filename, "rb") as fw:
+        data = list(fw.read())
+        return program_flash(data, callback)
 
-def StopInterface():
-    RebootController()
-    iface.DeinitI2C()
+def interface_get_help():
+    return iface.HELP_TEXT
 
-def ReadFlashFile(filename, callback=None):
-    fr = open(filename, "wb")
-    (buf, crcOK) = ReadFlash(int(config["Size"], 16), callback)
-    fr.write(bytearray(buf))
-
-def WriteFlashFile(filename, callback=None):
-    fsize = os.stat(filename).st_size
-    with open (filename, "rb") as fl:
-        data = fl.read()
-    if data[0:12] == "GMI GFF V1.0":
-        print("Detected GFF image")
-        if fsize < 256:
-            print("This file looks too small {0}".format(fsize))
-            return None
-        result, out = DecodeGff(data[256:])
-        if result:
-            return out
-        else:
-            return None
-    ProgramFlash(int(config["Size"], 16), data, callback)
-
-def InterfaceGetHelp():
-    return iface.HelpText
-
-def ProgresssBar(value):
-    """Print progress line. Value is from 0 to 1"""
-    print("Progress: |{0}| {1:6.1%}".format(
-        ("#" * int(value * 25)).ljust(25),
-        value),
-        end="\r") # Go back to the beggining of line
-    if (value == 1):
-        print() # Auto new line on 100%
 
 if __name__ == "__main__":
-    parser = ArgumentParser(description="Multi-interface RTD266X firmware progammer.")
-    parser.add_argument('-a', '--available-interfaces', action="store_true", dest="listIface",
-                        help='List all interfaces')
-    parser.add_argument('-n', '--interface-info', action="store_true", dest="helpInterface",
-                        help='Description of the interface')
+    parser = ArgumentParser(description="Multi-interface RTD2660/RTD2662 firmware progammer.")
+    parser.add_argument('-a', '--available-interfaces', action="store_true", dest="list_iface",
+                        help='list all available programming interfaces')
     parser.add_argument('-i', '--interface', type=str, dest="interface",
-                        help='Programming interface')
-    parser.add_argument('-l', '--list-devices', action="store_true", dest="listDev",
-                        help='List devices from interface')
+                        help='select what programming interface to use')
+    parser.add_argument('-n', '--interface-info', action="store_true", dest="help_iface",
+                        help='show interface description and information')
+    parser.add_argument('-s', '--settings', type=str, dest="settings",
+                        help="set up interface settings")
+    parser.add_argument('-l', '--list-devices', action="store_true", dest="list_dev",
+                        help='list available interface-devices and whether the controller was detected on them')
     parser.add_argument('-d', '--device', type=str, dest="dev",
-                        help='Select device from interface')
+                        help='select which interface-device to use')
+    parser.add_argument('-r', '--read-output', type=str, dest="read_file",
+                        help='read flash into this file')
     parser.add_argument('-e', '--erase', action="store_true", dest="erase",
-                        help='Erase flash of the controller')
-    parser.add_argument('-w', '--write-input', type=str, dest="writeFile",
-                        help='Write flash from file (Binary or GFF)')
-    parser.add_argument('-r', '--read-output', type=str, dest="readFile",
-                        help='Read flash and write to file')
+                        help='erase flash of the controller')
+    parser.add_argument('-w', '--write-input', type=str, dest="write_file",
+                        help='write flash from this binary file')
+    parser.add_argument('-z', '--read-size', type=str, dest="read_size",
+                        help='Set the number of bytes to read from flash')
     parser.add_argument('-t', '--trace', action="store_true", dest="trace",
-                        help='Output full exception trace')
-    args = parser.parse_args()
-    #args.interface = "i2cdev"
+                        help='output full exception trace')
+    # TODO: Add read faking, allowing a use of unidirectional interfaces
+    args = parser.parse_args(parameters.split(' ') if len(sys.argv) <= 1 and parameters else None)
+
     try:
-        if args.listIface or (not args.interface):
+        if args.list_iface:
             print("Available interfaces:", end="\n  * ")
-            print('\n  * '.join(GetInterfaceList()))
+            print('\n  * '.join(get_interface_list()))
             exit(0)
-        LoadInterface(args.interface)
 
-        if args.helpInterface:
-            InterfaceGetHelp()
+        if not args.interface: # If no interface was passed, show help
+            parser.print_help()
+            exit(0)
 
-        if args.listDev or not args.dev:
-            devList = GetDeviceList()
+        load_interface(args.interface)
+
+        if args.help_iface:
+            print(interface_get_help())
+            exit(0)
+
+        if args.list_dev:
+            dev_list = get_device_list()
             print(" Device Number | Controller detected | Device Name ")
-            for dev in devList:
-                print("{0:^15}|{1:^21}| {2}".format(dev, "Yes" if devList[dev][1] else "No", devList[dev][0].strip()))
+            for dev in sorted(dev_list):
+                print(f"{dev:^15}|{'Yes' if dev_list[dev][1] else 'No':^21}| {dev_list[dev][0].strip()}")
             exit(0)
-        StartInterface(int(args.dev, 0)) # Interpret the base from the string as an integer literal.
+
+        if not args.dev:
+            print("No device passed, using first available...")
+            dev_list  = get_device_list()
+            dev_found = None
+            for dev in dev_list:
+                if dev_list[dev][1]:
+                    dev_found = dev
+                    break
+            if dev_found is None:
+                print("No device with controller found!")
+                exit(1)
+            print(f"Found controller on device {dev_found}!")
+            args.dev = str(dev_found)
+
+        start_interface(int(args.dev, 0), args.settings) # Interpret the base from the string
+        setup_flash()
 
         if args.erase:
-            EraseFlash()
+            erase_flash()
 
-        if args.writeFile != None:
-            EraseFlash()
-            WriteFlashFile(args.writeFile, lambda s, e, c: ProgresssBar(c/(e-s)))
+        if args.write_file:
+            erase_flash()
+            if not write_flash_file(args.write_file, lambda s, e, c: progress_bar(c/(e-s))):
+                raise ValueError("CRC MISMATCH DETECTED!!!")
 
-        if args.readFile != None:
-            ReadFlashFile(args.readFile, lambda s, e, c: ProgresssBar(c/(e-s)))
+        if args.read_file:
+            if args.read_size:
+                READ_SIZE = int(args.readSize, 0)
+            else:
+                print(f"WARNING: '-z READ_SIZE' not set, default read amount of {READ_SIZE // 1024} KiB used")
+            if not read_flash_file(args.read_file, lambda s, e, c: progress_bar(c/(e-s))):
+                raise ValueError("CRC MISMATCH DETECTED!!!!")
 
-        StopInterface()
+        stop_interface()
     except Exception as e:
-        if args.trace:
+        if args.trace or len(str(e)) == 0:
             raise e
         else:
             print(e)
+            exit(1)

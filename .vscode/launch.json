@@ -1,0 +1,22 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug rtdmultiprog.py",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/rtdmultiprog.py",
+            "console": "integratedTerminal"
+        }
+        {
+            "name": "Debug rtdmultiprog_test.py",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/rtdmultiprog_test.py",
+            "console": "integratedTerminal"
+        }
+    ]
+}

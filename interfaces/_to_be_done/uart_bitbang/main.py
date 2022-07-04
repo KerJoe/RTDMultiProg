@@ -9,7 +9,7 @@ class I2C(interfaceBase):
     AvailableSystems = [ "" ] # Unsure if Mac OS Darwin is supported
     AvailableArchitectures = [ "" ]
 
-    def ListI2C(self):
+    def list_i2c(self):
         devDict = {}
         devList = serial.tools.list_ports.comports()
         for dev in devList:
@@ -19,13 +19,13 @@ class I2C(interfaceBase):
         return devDict
 
 
-    def InitI2C(self, device):
+    def init_i2c(self, device):
         self.fi2c = posix.open("/dev/i2c-"+str(device), posix.O_RDWR)
 
-    def DeinitI2C(self):
+    def deinit_i2c(self):
         posix.close(self.fi2c)
 
-    def WriteI2C(self, address, data):
+    def write_i2c(self, address, data):
         if type(data) == int:
             data = [data]
         data = bytes([(i & 0xFF) for i in data]) # Avoid bytes must be in range(0, 256) error
@@ -35,5 +35,5 @@ class I2C(interfaceBase):
         except IOError:
             raise ConnectionError("No ACK from device")
 
-    def ReadI2C(self, address, count):
+    def read_i2c(self, address, count):
         return list(posix.read(self.fi2c, count))

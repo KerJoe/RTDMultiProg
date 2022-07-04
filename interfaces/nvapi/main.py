@@ -1,11 +1,17 @@
-from ctypes import *
-from posixpath import basename
 import sys
-import os
-from . import queryCodes
-from .._common_.interfaceBase import interfaceBase
+from interfaces.interface_base import InterfaceBase
+from ctypes    import *
+from .         import queryCodes
 
-class I2C(interfaceBase):
+class I2C(InterfaceBase):
+    AVAILABLE_SYSTEMS = [ "Windows" ]
+    AVAILABLE_ARCHITECTURES = [ "i386", "x86_64" ]
+    HELP_TEXT = ("This interface uses NVAPI library "
+                 "for I2C communication through NVIDIA GPU's.\n"
+                 "WARNING: Communication is available ONLY "
+                 "if the display is detected (EDID is programmed and hot plug detect is active), "
+                 "meaning that only preprogrammed controllers can be accessed.")
+
     nvapi = None
 
     NVAPI_MAX_PHYSICAL_GPUS = 64
@@ -65,9 +71,6 @@ class I2C(interfaceBase):
             [ queryCodes._NvAPI_I2CRead, [ NvPhysicalGpuHandle, NV_I2C_INFO ] ]
     }
 
-    AvailableSystems = [ "Windows" ]
-    AvailableArchitectures = [ "32bit", "64bit" ]
-
     def getNvapiFunction(self, code, argTypes):
         self.nvapi.nvapi_QueryInterface.restype = c_void_p
         funcPtr = self.nvapi.nvapi_QueryInterface(c_uint(code))
@@ -115,13 +118,13 @@ class I2C(interfaceBase):
         self.i2cInfo.cbSize          = 2
         self.i2cInfo.i2cSpeed        = 27
 
-    def ListI2C(self):
+    def list_i2c(self):
         return { k:("Display" + str(k)) for k in range(self.displayCount) }
 
-    def InitI2C(self, device):
+    def init_i2c(self, device, settings):
         self.i2cInfo.displayMask = self.outputIDs[device]
 
-    def WriteI2C(self, address, data):
+    def write_i2c(self, address, data):
         self.i2cInfo.i2cDevAddress = address << 1
         dat = (c_uint8 * len(data))(*data)
         self.i2cInfo.pbData = dat
@@ -131,7 +134,7 @@ class I2C(interfaceBase):
         if retCode != 0:
             raise ConnectionError("NvAPI_I2CWrite error. Return code: {0}".format(retCode))
 
-    def ReadI2C(self, address, count):
+    def read_i2c(self, address, count):
         dat  = (c_ubyte * count)(*([0] * count))
         self.i2cInfo.pbData = dat
         self.i2cInfo.cbSize = count
