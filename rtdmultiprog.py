@@ -84,8 +84,11 @@ def enter_isp():
 
 def reboot_controller():
     """ Disable In-System Programming mode, Restart internal MCU """
-    write_reg(0xEE, 0x02)
-    write_reg(0x6F, 0x01)
+    try:
+        write_reg(0xEE, 0x02)
+        #write_reg(0x6F, 0x00)
+    except ConnectionError:
+        pass
 
 def isp_custom_instruction(cmd_type, cmd_code, read_n, write_n, write_value):
     if   write_n == 1:
@@ -347,7 +350,7 @@ if __name__ == "__main__":
 
         if args.read_file:
             if args.read_size:
-                READ_SIZE = int(args.readSize, 0)
+                READ_SIZE = int(args.read_size, 0)
             else:
                 print(f"WARNING: '-z READ_SIZE' not set, default read amount of {READ_SIZE // 1024} KiB used")
             if not read_flash_file(args.read_file, lambda s, e, c: progress_bar(c/(e-s))):
