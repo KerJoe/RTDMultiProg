@@ -42,7 +42,7 @@ options:
 
 ## Adding new interfaces
 1. Create new folder in `./interfaces/` directory with your interface name
-2. Create file named `./interfaces/IFACE_NAME/main.py`
+2. Create file named `./interfaces/{INTERFACE_NAME}/main.py`
 3. Add a class named `I2C` inheriting `InterfaceBase`
 ```
 from interfaces.interface_base import InterfaceBase
@@ -50,8 +50,8 @@ from interfaces.interface_base import InterfaceBase
 class I2C(InterfaceBase):
   pass
 ```
-4. Implement basic functions: `list_i2c`, `init_i2c`, `deinit_i2c`, `read_i2c` (read `./interface/interface_base.py` for more info)
-5. Run `./rtdmultiprog_test.py IFACE_NAME` to test the new interface (you may need to manualy comment out the tests from `test_interface` and `test_device` functions)
+4. Implement basic functions: `list_i2c`, `init_i2c`, `deinit_i2c`, `read_i2c`, `write_i2c` (read `./interface/interface_base.py` for more info)
+5. Run `./rtdmultiprog_test.py {INTERFACE_NAME}` to test the new interface (you may need to manualy comment out the tests from `test_interface` and `test_device` functions)
 
 ## Usage examples
 
