@@ -104,7 +104,8 @@ def isp_custom_instruction(cmd_type, cmd_code, read_n, write_n, write_value):
     # Execute custom instruction and wait until done
     write_reg(0x61, cmd_code)
     write_reg(0x60, (cmd_type<<5) | (write_n<<3) | (read_n<<1) | 1)
-    poll(lambda: not read_reg(0x60)[0] & 0x01, "Custom Instruction Timeout")
+    timeout = 20 if cmd_code == ERAS else 2
+    poll(lambda: not read_reg(0x60)[0] & 0x01, "Custom Instruction Timeout", timeout)
 
     if   read_n == 1:
         return  read_reg(0x67)[0]
