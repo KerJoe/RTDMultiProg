@@ -24,7 +24,7 @@ class I2C(InterfaceBase):
             raise FileNotFoundError("I2C device directory not found")
         dev_dict = {}
         for dev in dev_list:
-            match = re.match("i2c-.*", dev)
+            match = re.match("i2c-\d+", dev)
             if match:
                 num = int(re.sub("i2c-", "", dev))
                 with open("/sys/bus/i2c/devices/"+match.string+"/name", 'r') as fname:
