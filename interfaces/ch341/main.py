@@ -1,11 +1,11 @@
 from interfaces.interface_base import InterfaceBase
 from argparse import ArgumentParser
 from ctypes   import *
-import os
+import os, sys
 
 class I2C(InterfaceBase):
     AVAILABLE_SYSTEMS = [ "Windows" ]
-    AVAILABLE_ARCHITECTURES = [ "i386" ]
+    AVAILABLE_ARCHITECTURES = [ "i386", "x86_64" ]
     HELP_TEXT = ("OPTIONS: \"-s n\": Set transaction speed\n"
                  "0 = low speed / 20KHz, 1 = standard / 100KHz (default), 2 = fast / 400KHz, 3 = high speed / 750KHz")
 
@@ -13,7 +13,10 @@ class I2C(InterfaceBase):
     _index = -1
 
     def __init__(self):
-        self._ch341 = cdll.LoadLibrary(os.path.dirname(__file__) + "\\ch341.dll")
+        if sys.maxsize > 2**32: # x86_64
+            self._ch341 = cdll.LoadLibrary(os.path.dirname(__file__) + "\\ch341-x86_64.dll")
+        else: # i386
+            self._ch341 = cdll.LoadLibrary(os.path.dirname(__file__) + "\\ch341-i386.dll")
 
     def list_i2c(self):
         devList = {}
