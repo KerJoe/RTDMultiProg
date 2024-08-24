@@ -212,7 +212,8 @@ def load_interface(interface):
 
     # Test if all systems are supported or we are running on a supported system
     if not (iface_module.AVAILABLE_SYSTEMS == [""] or platform.system() in iface_module.AVAILABLE_SYSTEMS):
-        raise SystemError(f"Interface supports {', '.join(iface_module.AVAILABLE_SYSTEMS)}; not {platform.system()}")
+        print(f"Interface supports {', '.join(iface_module.AVAILABLE_SYSTEMS)}; not {platform.system()}")
+    #    raise SystemError(f"Interface supports {', '.join(iface_module.AVAILABLE_SYSTEMS)}; not {platform.system()}")
 
     # # Test if all architectures are supported orwe are running on a supported architecture
     # mach_to_bits = { "x86_64": "64bit", "x86": "32bit" } # Machine name to executable bitness
