@@ -136,14 +136,17 @@ def get_flash_id():
 
 def erase_flash():
     print("Erasing... ", end='')
+    write_reg(0xe3, read_reg(0xe3)[0] | (1<<2)) # deassert WP pin
     isp_custom_instruction(CI_WRITE_AFTER_WREN, WRSR, 0, 1, 0x00) # Unprotect the flash
     isp_custom_instruction(CI_ERASE, ERAS, 0, 0, 0x00)            # Erase the flash
     isp_custom_instruction(CI_WRITE_AFTER_WREN, WRSR, 0, 1, 0x1C) # Protect the flash
+    write_reg(0xe3, read_reg(0xe3)[0] & ~(1<<2)) # assert WP pin
     print("done")
 
 def program_flash(data, progress_callback=lambda s, e, c: None):
     print(f"Will write {len(data) / 1024:.1f} KiB")
 
+    write_reg(0xe3, read_reg(0xe3)[0] | (1<<2)) # deassert WP pin
     isp_custom_instruction(CI_WRITE_AFTER_WREN, WRSR, 0, 1, 0x00) # Unprotect the flash
     pages = list(div_to_chunks(data, PAGE_SIZE))
     for page_n, page in enumerate(pages):
@@ -166,6 +169,7 @@ def program_flash(data, progress_callback=lambda s, e, c: None):
 
     poll(lambda: not read_reg (0x6F)[0] & 0x40, "Programming done timeout")
     isp_custom_instruction(CI_WRITE_AFTER_WREN, WRSR, 0, 1, 0x1C)  # Protect the flash
+    write_reg(0xe3, read_reg(0xe3)[0] & ~(1<<2)) # assert WP pin
 
     data_crc = calculate_crc(data)
     chip_crc = isp_get_crc(0, len(data) - 1)
