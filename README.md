@@ -79,7 +79,7 @@ Available interfaces:
 
 ### Read firmware from first available device
 ```
-> ./rtdmultiprog.py -i i2cdev "/path/to/firmware/file.bin"
+> ./rtdmultiprog.py -i i2cdev -r "/path/to/firmware/file.bin"
 No device passed, using first available...
 Found controller on device 1!
 FLASH ID: 0xffff
